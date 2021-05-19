@@ -58,6 +58,10 @@ def build_argparser():
                       help='Optional. Specify the target device to infer on; CPU, GPU, FPGA, HDDL or MYRIAD is '
                            'acceptable. The sample will look for a suitable plugin for device specified. '
                            'Default value is CPU.')
+    # add
+    args.add_argument('--record', default=False, action='store_true',
+                      help='Record anonymously.')
+
 
     common_model_args = parser.add_argument_group('Common model options')
     common_model_args.add_argument('-t', '--prob_threshold', default=0.1, type=float,
@@ -147,6 +151,9 @@ def draw_poses(img, poses, point_score_threshold, skeleton=default_skeleton, dra
     stick_width = 4
 
     img_limbs = np.copy(img)
+
+    img = np.zeros_like(img)
+    img_limbs = np.zeros_like(img)
     for pose in poses:
         points = pose[:, :2].astype(int).tolist()
         points_scores = pose[:, 2]
@@ -202,11 +209,12 @@ def main():
     hpe_pipeline.submit_data(frame, 0, {'frame': frame, 'start_time': start_time})
     next_frame_id = 1
     next_frame_id_to_show = 0
+    record_list = []
 
     presenter = monitors.Presenter(args.utilization_monitors, 55,
                                    (round(frame.shape[1] / 4), round(frame.shape[0] / 8)))
     video_writer = cv2.VideoWriter()
-    if args.output and not video_writer.open(args.output, cv2.VideoWriter_fourcc(*'MJPG'), cap.fps(),
+    if args.output and not video_writer.open(args.output, cv2.VideoWriter_fourcc(*'mp4v'), cap.fps(),
             (frame.shape[1], frame.shape[0])):
         raise RuntimeError("Can't open video writer")
 
@@ -223,6 +231,8 @@ def main():
 
             if len(poses) and args.raw_output_message:
                 print_raw_results(poses, scores)
+            if args.record:
+                record_list.append(poses)
 
             presenter.drawGraphs(frame)
             frame = draw_poses(frame, poses, args.prob_threshold)
@@ -236,6 +246,9 @@ def main():
                 ESC_KEY = 27
                 # Quit.
                 if key in {ord('q'), ord('Q'), ESC_KEY}:
+                    if args.record:
+                        print(record_list)
+                        np.save("save_file.npy", record_list)
                     break
                 presenter.handleKey(key)
             next_frame_id_to_show += 1

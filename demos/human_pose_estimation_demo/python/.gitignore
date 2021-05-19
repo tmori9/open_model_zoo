@@ -1,2 +1,4 @@
 .vscode
 intel
+*.npy
+*.mp4
