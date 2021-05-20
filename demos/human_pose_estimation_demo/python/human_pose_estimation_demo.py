@@ -19,7 +19,9 @@ import logging
 import sys
 from argparse import ArgumentParser, SUPPRESS
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, process_time_ns
+import time
+import datetime
 
 import cv2
 import numpy as np
@@ -151,6 +153,38 @@ def draw_poses(img, poses, point_score_threshold, skeleton=default_skeleton, dra
     stick_width = 4
 
     img_limbs = np.copy(img)
+    for pose in poses:
+        points = pose[:, :2].astype(int).tolist()
+        points_scores = pose[:, 2]
+        # Draw joints.
+        for i, (p, v) in enumerate(zip(points, points_scores)):
+            if v > point_score_threshold:
+                cv2.circle(img, tuple(p), 1, colors[i], 2)
+        # Draw limbs.
+        for i, j in skeleton:
+            if points_scores[i] > point_score_threshold and points_scores[j] > point_score_threshold:
+                if draw_ellipses:
+                    middle = (points[i] + points[j]) // 2
+                    vec = points[i] - points[j]
+                    length = np.sqrt((vec * vec).sum())
+                    angle = int(np.arctan2(vec[1], vec[0]) * 180 / np.pi)
+                    polygon = cv2.ellipse2Poly(tuple(middle), (int(length / 2), min(int(length / 50), stick_width)),
+                                               angle, 0, 360, 1)
+                    cv2.fillConvexPoly(img_limbs, polygon, colors[j])
+                else:
+                    cv2.line(img_limbs, tuple(points[i]), tuple(points[j]), color=colors[j], thickness=stick_width)
+    cv2.addWeighted(img, 0.4, img_limbs, 0.6, 0, dst=img)
+    return img
+
+
+def draw_poses_skeleton(img, poses, point_score_threshold, video_writer, skeleton=default_skeleton, draw_ellipses=False):
+    if poses.size == 0:
+        print(img.shape[1])
+        print(img.shape[0])
+        return img
+    stick_width = 4
+
+    img_limbs = np.copy(img)
 
     img = np.zeros_like(img)
     img_limbs = np.zeros_like(img)
@@ -175,6 +209,7 @@ def draw_poses(img, poses, point_score_threshold, skeleton=default_skeleton, dra
                 else:
                     cv2.line(img_limbs, tuple(points[i]), tuple(points[j]), color=colors[j], thickness=stick_width)
     cv2.addWeighted(img, 0.4, img_limbs, 0.6, 0, dst=img)
+    video_writer.write(img)
     return img
 
 
@@ -211,63 +246,95 @@ def main():
     next_frame_id_to_show = 0
     record_list = []
 
+    dt_now = datetime.datetime.now()
+    output_dir = dt_now.strftime('%Y%m%d')
+    Path('output/'+output_dir).mkdir(exist_ok=True)
+    if dt_now.minute <= 29:
+        output_file_name = dt_now.strftime('%H') + '00'
+    else:
+        output_file_name = dt_now.strftime('%H') + '30'
+    dt_pre = datetime.datetime.now()
+
     presenter = monitors.Presenter(args.utilization_monitors, 55,
                                    (round(frame.shape[1] / 4), round(frame.shape[0] / 8)))
     video_writer = cv2.VideoWriter()
-    if args.output and not video_writer.open(args.output, cv2.VideoWriter_fourcc(*'mp4v'), cap.fps(),
+    if args.output and not video_writer.open(args.output, cv2.VideoWriter_fourcc(*'mp4v'), 3,
             (frame.shape[1], frame.shape[0])):
         raise RuntimeError("Can't open video writer")
 
     print("To close the application, press 'CTRL+C' here or switch to the output window and press ESC key")
-    while True:
-        if hpe_pipeline.callback_exceptions:
-            raise hpe_pipeline.callback_exceptions[0]
-        # Process all completed requests
-        results = hpe_pipeline.get_result(next_frame_id_to_show)
-        if results:
-            (poses, scores), frame_meta = results
-            frame = frame_meta['frame']
-            start_time = frame_meta['start_time']
+    try:
+        while True:
+            if hpe_pipeline.callback_exceptions:
+                raise hpe_pipeline.callback_exceptions[0]
+            # Process all completed requests
+            results = hpe_pipeline.get_result(next_frame_id_to_show)
+            if results:
+                dt_now = datetime.datetime.now()
+                if (dt_pre.minute == 59 and dt_now.minute == 0) or (dt_pre.minute == 29 and dt_now.minute == 30):
+                    if dt_pre.minute <= 29:
+                        output_file_name_pre = dt_pre.strftime('%H') + '00'
+                    else:
+                        output_file_name_pre = dt_pre.strftime('%H') + '30'
 
-            if len(poses) and args.raw_output_message:
-                print_raw_results(poses, scores)
-            if args.record:
-                record_list.append(poses)
+                    print("saved: ", output_dir + output_file_name_pre)
+                    np.save("output/"+output_dir+"/"+output_file_name+".npy", record_list)
+                    record_list = []
+                    print("フォルダを作成します。")
+                    output_dir = dt_now.strftime('%Y%m%d')
+                    Path('output/'+output_dir).mkdir(exist_ok=True)
+                    if dt_now.minute <= 29:
+                        output_file_name = dt_now.strftime('%H') + '00'
+                    else:
+                        output_file_name = dt_now.strftime('%H') + '30'
+                        
 
-            presenter.drawGraphs(frame)
-            frame = draw_poses(frame, poses, args.prob_threshold)
-            metrics.update(start_time, frame)
-            if video_writer.isOpened() and (args.output_limit <= 0 or next_frame_id_to_show <= args.output_limit-1):
-                video_writer.write(frame)
-            if not args.no_show:
-                cv2.imshow('Pose estimation results', frame)
-                key = cv2.waitKey(1)
+                # pre_minute = dt_now.minute
+                dt_pre = dt_now
+                (poses, scores), frame_meta = results
+                frame = frame_meta['frame']
+                start_time = frame_meta['start_time']
 
-                ESC_KEY = 27
-                # Quit.
-                if key in {ord('q'), ord('Q'), ESC_KEY}:
-                    if args.record:
-                        print(record_list)
-                        np.save("save_file.npy", record_list)
+                if len(poses) and args.raw_output_message:
+                    print_raw_results(poses, scores)
+                if args.record:
+                    record_list.append([poses, time.time()])
+
+                presenter.drawGraphs(frame)
+                frame = draw_poses(frame, poses, args.prob_threshold)
+                # frame = draw_poses_skeleton(frame, poses, args.prob_threshold, video_writer)
+                metrics.update(start_time, frame)
+                if video_writer.isOpened() and (args.output_limit <= 0 or next_frame_id_to_show <= args.output_limit-1):
+                    # video_writer.write(frame)
+                    pass
+                if not args.no_show:
+                    cv2.imshow('Pose estimation results', frame)
+                    key = cv2.waitKey(1)
+
+                    ESC_KEY = 27
+                    # Quit.
+                    if key in {ord('q'), ord('Q'), ESC_KEY}:
+                        break
+                    presenter.handleKey(key)
+                next_frame_id_to_show += 1
+                continue
+
+            if hpe_pipeline.is_ready():
+                # Get new image/frame
+                start_time = perf_counter()
+                frame = cap.read()
+                if frame is None:
                     break
-                presenter.handleKey(key)
-            next_frame_id_to_show += 1
-            continue
 
-        if hpe_pipeline.is_ready():
-            # Get new image/frame
-            start_time = perf_counter()
-            frame = cap.read()
-            if frame is None:
-                break
+                # Submit for inference
+                hpe_pipeline.submit_data(frame, next_frame_id, {'frame': frame, 'start_time': start_time})
+                next_frame_id += 1
 
-            # Submit for inference
-            hpe_pipeline.submit_data(frame, next_frame_id, {'frame': frame, 'start_time': start_time})
-            next_frame_id += 1
-
-        else:
-            # Wait for empty request
-            hpe_pipeline.await_any()
+            else:
+                # Wait for empty request
+                hpe_pipeline.await_any()
+    except KeyboardInterrupt:
+        pass
 
     hpe_pipeline.await_all()
     # Process completed requests
@@ -299,6 +366,9 @@ def main():
         else:
             break
 
+    if args.record:
+        print("saved: ", output_dir+output_file_name)
+        np.save("output/"+output_dir+"/"+output_file_name+".npy", record_list)
     metrics.print_total()
     print(presenter.reportMeans())
 
